@@ -79,9 +79,46 @@ fn main() -> std::io::Result<()> {
             }
             ConnectionState::Established => {
                 println!("\nHandshake successful! Connection Established.");
-                // In a real application, data transfer would happen here.
+                println!("Waiting for data...");
+
+                // Loop to receive data packets.
+                loop {
+                    socket.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+                    let mut data_buf = [0; 1024];
+                    match socket.recv_from(&mut data_buf) {
+                        Ok((bytes_read, src_addr)) => {
+                            if let Ok(data_packet) = StyxPacket::from_bytes(&data_buf[..bytes_read]) {
+                                // Check if it's a data packet (no flags set)
+                                if data_packet.flags == 0 {
+
+
+                                    println!("Received data: {:?}", data_packet);
+
+                                    // Send an ACK for the data packet
+                                    let ack_packet = StyxPacket {
+                                        sequence_number: 0, // Not relevant for this ACK
+                                        ack_number: data_packet.sequence_number,
+                                        flags: ACK,
+                                        payload: Vec::new(),
+                                    };
+                                    socket.send_to(&ack_packet.to_bytes(), src_addr)?;
+                                    println!("Sent ACK for seq_num: {}", data_packet.sequence_number);
+                                } else {
+                                    // Handle other packet types if necessary, e.g., FIN
+                                    println!("Received non-data packet, ignoring for now.");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // If we time out, assume the client is done sending data.
+                            println!("Timeout waiting for data: {}. Connection closed.", e);
+                            break; // Exit the data receiving loop
+                        }
+                    }
+                }
+
                 println!("--------------------------------------------------");
-                // For this example, we immediately go back to listening for a new connection.
+                // Go back to listening for a new connection.
                 state = ConnectionState::Listen;
                 println!("Server is in {:?} state", state);
             }
