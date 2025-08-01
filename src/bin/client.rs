@@ -18,39 +18,39 @@ fn main() -> std::io::Result<()> {
             flags: SYN,
             payload: format!("Packet number {}", i).into_bytes(),
         };
-        println!("Sending packet: {:?}", packet_to_send);
-
-        // Serialize the packet into bytes.
         let bytes_to_send = packet_to_send.to_bytes();
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 3;
 
-        // Send the data.
-        socket.send_to(&bytes_to_send, server_addr)?;
+        loop {
+            attempts += 1;
 
-        // Set a timeout for receiving the ACK.
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
+            println!("Sending packet (attempt {}): {:?}", attempts, packet_to_send);
+            socket.send_to(&bytes_to_send, server_addr)?;
 
-        // Try to receive the ACK.
-        let mut ack_buf = [0; 1024];
-        match socket.recv_from(&mut ack_buf) {
-            Ok((ack_bytes, _)) => {
-                match StyxPacket::from_bytes(&ack_buf[..ack_bytes]) {
-                    Ok(ack_packet) => {
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
+
+            let mut ack_buf = [0; 1024];
+            match socket.recv_from(&mut ack_buf) {
+                Ok((ack_bytes, _)) => {
+                    if let Ok(ack_packet) = StyxPacket::from_bytes(&ack_buf[..ack_bytes]) {
                         if ack_packet.flags & ACK != 0 && ack_packet.ack_number == packet_to_send.sequence_number {
-                            println!("  -> Received ACK for seq_num: {}", ack_packet.ack_number);
-                        } else {
-                            println!("  -> Received invalid ACK: {:?}", ack_packet);
+                            println!("  -> SUCCESS: Received ACK for seq_num: {}", ack_packet.ack_number);
+                            break; // Success, exit retry loop
                         }
                     }
-                    Err(e) => eprintln!("  -> Error deserializing ACK: {}", e),
                 }
-            }
-            Err(e) => {
-                eprintln!("  -> Did not receive ACK for seq_num {}: {}", i, e);
+                Err(e) => {
+                    eprintln!("  -> TIMEOUT for seq_num {}. Retrying...", i);
+                    if attempts >= MAX_ATTEMPTS {
+                        eprintln!("  -> FAILED: Max retries for seq_num {} reached. Giving up.", i);
+                        break; // Give up
+                    }
+                }
             }
         }
     }
 
-    println!("\nFinished sending 5 packets.");
-
+    println!("Finished sending 5 packets.");
     Ok(())
 }
