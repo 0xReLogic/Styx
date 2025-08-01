@@ -3,6 +3,7 @@
 use std::net::UdpSocket;
 // Note: We use 'Styx::' to refer to our library crate.
 use Styx::packet::{StyxPacket, SYN, ACK};
+use Styx::state::ConnectionState;
 
 fn main() -> std::io::Result<()> {
     // Bind to a local address. The OS will pick an available port.
@@ -10,47 +11,77 @@ fn main() -> std::io::Result<()> {
     // The server's address we want to send data to.
     let server_addr = "127.0.0.1:8081";
 
-    for i in 0..5 {
-        // Create a sample packet to send.
-        let packet_to_send = StyxPacket {
-            sequence_number: i,
-            ack_number: 0,
-            flags: SYN,
-            payload: format!("Packet number {}", i).into_bytes(),
-        };
-        let bytes_to_send = packet_to_send.to_bytes();
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 3;
+    let mut state = ConnectionState::Closed;
+    let mut client_isn: u32 = 0;
 
-        loop {
-            attempts += 1;
-
-            println!("Sending packet (attempt {}): {:?}", attempts, packet_to_send);
-            socket.send_to(&bytes_to_send, server_addr)?;
-
-            socket.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
-
-            let mut ack_buf = [0; 1024];
-            match socket.recv_from(&mut ack_buf) {
-                Ok((ack_bytes, _)) => {
-                    if let Ok(ack_packet) = StyxPacket::from_bytes(&ack_buf[..ack_bytes]) {
-                        if ack_packet.flags & ACK != 0 && ack_packet.ack_number == packet_to_send.sequence_number {
-                            println!("  -> SUCCESS: Received ACK for seq_num: {}", ack_packet.ack_number);
-                            break; // Success, exit retry loop
+    // The main state machine loop for the client.
+    loop {
+        println!("Client state: {:?}", state);
+        match state {
+            ConnectionState::Closed => {
+                // In the Closed state, we begin the handshake by sending a SYN packet.
+                client_isn = 100; // Set a random Initial Sequence Number
+                let syn_packet = StyxPacket {
+                    sequence_number: client_isn,
+                    ack_number: 0,
+                    flags: SYN,
+                    payload: Vec::new(),
+                };
+                println!("1. Sending SYN...");
+                socket.send_to(&syn_packet.to_bytes(), server_addr)?;
+                // Transition to the SynSent state to wait for a reply.
+                state = ConnectionState::SynSent;
+            }
+            ConnectionState::SynSent => {
+                // In the SynSent state, we are waiting for a SYN-ACK from the server.
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                let mut buf = [0; 1024];
+                match socket.recv_from(&mut buf) {
+                    Ok((bytes_read, _)) => {
+                        if let Ok(packet) = StyxPacket::from_bytes(&buf[..bytes_read]) {
+                            // Check if the packet is a valid SYN-ACK.
+                            if packet.flags == (SYN | ACK) && packet.ack_number == client_isn + 1 {
+                                println!("2. Received SYN-ACK: {:?}", packet);
+                                // Send the final ACK to complete the handshake.
+                                let server_isn = packet.sequence_number;
+                                let ack_packet = StyxPacket {
+                                    sequence_number: client_isn + 1,
+                                    ack_number: server_isn + 1,
+                                    flags: ACK,
+                                    payload: Vec::new(),
+                                };
+                                println!("3. Sending ACK...");
+                                socket.send_to(&ack_packet.to_bytes(), server_addr)?;
+                                // The handshake is complete. Transition to Established.
+                                state = ConnectionState::Established;
+                            } else {
+                                eprintln!("Error: Received invalid SYN-ACK. Closing connection.");
+                                state = ConnectionState::Closed;
+                                break; // Exit loop
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!("  -> TIMEOUT for seq_num {}. Retrying...", i);
-                    if attempts >= MAX_ATTEMPTS {
-                        eprintln!("  -> FAILED: Max retries for seq_num {} reached. Giving up.", i);
-                        break; // Give up
+                    Err(e) => {
+                        eprintln!("Timeout waiting for SYN-ACK: {}. Closing connection.", e);
+                        state = ConnectionState::Closed;
+                        break; // Exit loop
                     }
                 }
             }
+            ConnectionState::Established => {
+                // The connection is established. For now, we just print a message and exit.
+                println!("\nHandshake successful! Connection Established.");
+                // In a real application, data transfer would happen here.
+                state = ConnectionState::Closed; // For this example, we close immediately.
+                break; // Exit loop
+            }
+            // Other states are not handled by the client in this simple example.
+            _ => {
+                eprintln!("Unhandled state: {:?}. Closing.", state);
+                state = ConnectionState::Closed;
+                break;
+            }
         }
     }
-
-    println!("Finished sending 5 packets.");
     Ok(())
 }
