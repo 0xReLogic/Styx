@@ -31,16 +31,16 @@ The protocol's logic is governed by a state machine that tracks the connection s
 ```mermaid
 graph TD
     subgraph Connection Lifecycle
-        A[CLOSED] -->|`connect()`| B(SYN_SENT)
+        A[CLOSED] -->|connect| B(SYN_SENT)
         B -->|Receive SYN-ACK| C(ESTABLISHED)
-        A -->|`listen_and_accept()`| D(LISTEN)
+        A -->|listen_and_accept| D(LISTEN)
         D -->|Receive SYN| E(SYN_RCVD)
         E -->|Receive ACK| C
-        C -->|`close()`| F(FIN_WAIT_1)
+        C -->|close| F(FIN_WAIT_1)
         F -->|Receive ACK| G(FIN_WAIT_2)
         G -->|Receive FIN| H(TIME_WAIT)
         C -->|Receive FIN| I(CLOSE_WAIT)
-        I -->|`handle_passive_close()`| J(LAST_ACK)
+        I -->|handle_passive_close| J(LAST_ACK)
         J -->|Receive ACK| A
         H -->|Timeout| A
     end
