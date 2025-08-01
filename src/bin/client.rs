@@ -4,7 +4,7 @@ use std::net::UdpSocket;
 // Note: We use 'Styx::' to refer to our library crate.
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
-use Styx::packet::{StyxPacket, SYN, ACK};
+use Styx::packet::{StyxPacket, SYN, ACK, FIN};
 use Styx::state::ConnectionState;
 
 fn main() -> std::io::Result<()> {
@@ -15,6 +15,7 @@ fn main() -> std::io::Result<()> {
 
     let mut state = ConnectionState::Closed;
     let mut client_isn: u32 = 0;
+    let mut next_seq_num: u32 = 0;
 
     // The main state machine loop for the client.
     loop {
@@ -58,14 +59,12 @@ fn main() -> std::io::Result<()> {
                                 state = ConnectionState::Established;
                             } else {
                                 eprintln!("Error: Received invalid SYN-ACK. Closing connection.");
-                                state = ConnectionState::Closed;
                                 break; // Exit loop
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("Timeout waiting for SYN-ACK: {}. Closing connection.", e);
-                        state = ConnectionState::Closed;
                         break; // Exit loop
                     }
                 }
@@ -81,7 +80,7 @@ fn main() -> std::io::Result<()> {
                 let final_ack_num = client_isn + 1 + TOTAL_PACKETS_TO_SEND;
 
                 let mut base = client_isn + 1;
-                let mut next_seq_num = base;
+                next_seq_num = base;
                 
                 let mut sent_packets: Vec<StyxPacket> = Vec::new();
                 let mut acks_received = HashSet::new();
@@ -160,13 +159,87 @@ fn main() -> std::io::Result<()> {
                 }
 
                 println!("\nData transfer complete. All packets acknowledged.");
-                state = ConnectionState::Closed;
-                break;
+                // Data transfer is done, now let's close the connection gracefully.
+                state = ConnectionState::FinWait1;
+                // Don't break here, let the main loop handle the new state.
+            }
+
+            ConnectionState::FinWait1 => {
+                // Active close: send a FIN packet.
+                let fin_packet = StyxPacket {
+                    sequence_number: next_seq_num, // Continue sequence
+                    ack_number: 0,
+                    flags: FIN,
+                    payload: Vec::new(),
+                };
+                println!("4. Sending FIN...");
+                socket.send_to(&fin_packet.to_bytes(), server_addr)?;
+
+                // Wait for an ACK for our FIN.
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut buf = [0; 1024];
+                match socket.recv_from(&mut buf) {
+                    Ok((bytes_read, _)) => {
+                        if let Ok(packet) = StyxPacket::from_bytes(&buf[..bytes_read]) {
+                            if packet.flags == ACK && packet.ack_number == next_seq_num + 1 {
+                                println!("5. Received ACK for FIN.");
+                                state = ConnectionState::FinWait2;
+                            } else {
+                                eprintln!("Error: Did not receive a valid ACK for FIN. Got: {:?}", packet);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Timeout waiting for FIN-ACK: {}. Closing.", e);
+                        break;
+                    }
+                }
+            }
+
+            ConnectionState::FinWait2 => {
+                // Now we wait for the server to send its own FIN.
+                println!("Waiting for server's FIN...");
+                socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+                let mut buf = [0; 1024];
+                match socket.recv_from(&mut buf) {
+                    Ok((bytes_read, _)) => {
+                        if let Ok(packet) = StyxPacket::from_bytes(&buf[..bytes_read]) {
+                            if packet.flags == FIN {
+                                println!("6. Received FIN from server.");
+                                // Acknowledge the server's FIN.
+                                let final_ack = StyxPacket {
+                                    sequence_number: packet.ack_number, // Our seq num is their ack num
+                                    ack_number: packet.sequence_number + 1, // We ack their seq num
+                                    flags: ACK,
+                                    payload: Vec::new(),
+                                };
+                                println!("7. Sending final ACK...");
+                                socket.send_to(&final_ack.to_bytes(), server_addr)?;
+                                state = ConnectionState::TimeWait;
+                            } else {
+                                eprintln!("Error: Expected FIN from server, got: {:?}", packet);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Timeout waiting for server's FIN: {}. Closing.", e);
+                        break;
+                    }
+                }
+            }
+
+            ConnectionState::TimeWait => {
+                // Wait for a short period to ensure the final ACK is received by the server.
+                println!("Entering TimeWait state for 2 seconds...");
+                std::thread::sleep(Duration::from_secs(2));
+                println!("Connection closed successfully.");
+                break; // All done, exit the loop.
             }
             // Other states are not handled by the client in this simple example.
             _ => {
                 eprintln!("Unhandled state: {:?}. Closing.", state);
-                state = ConnectionState::Closed;
                 break;
             }
         }

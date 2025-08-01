@@ -2,7 +2,7 @@
 
 use std::net::{UdpSocket, SocketAddr};
 // Note: We use 'Styx::' to refer to our library crate.
-use Styx::packet::{StyxPacket, SYN, ACK};
+use Styx::packet::{StyxPacket, SYN, ACK, FIN};
 use Styx::state::ConnectionState;
 
 fn main() -> std::io::Result<()> {
@@ -103,29 +103,86 @@ fn main() -> std::io::Result<()> {
                                     };
                                     socket.send_to(&ack_packet.to_bytes(), src_addr)?;
                                     println!("Sent ACK for seq_num: {}", data_packet.sequence_number);
-                                } else {
-                                    // Handle other packet types if necessary, e.g., FIN
-                                    println!("Received non-data packet, ignoring for now.");
+                                } else if data_packet.flags == FIN {
+                                    println!("4. Received FIN from client.");
+                                    // Acknowledge the client's FIN.
+                                    let ack_for_fin = StyxPacket {
+                                        sequence_number: server_isn + 1, // Seq num for our side
+                                        ack_number: data_packet.sequence_number + 1,
+                                        flags: ACK,
+                                        payload: Vec::new(),
+                                    };
+                                    socket.send_to(&ack_for_fin.to_bytes(), src_addr)?;
+                                    println!("5. Sent ACK for client's FIN.");
+
+                                    // Transition to CloseWait. The application (this code) can now prepare to close.
+                                    state = ConnectionState::CloseWait;
+                                    break; // Exit the data-receiving loop to handle the new state.
                                 }
                             }
                         }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                            // It's normal to time out if the client has nothing more to send.
+                            // We wait for a FIN to formally close the connection.
+                            continue;
+                        }
                         Err(e) => {
-                            // If we time out, assume the client is done sending data.
-                            println!("Timeout waiting for data: {}. Connection closed.", e);
-                            break; // Exit the data receiving loop
+                            eprintln!("Socket error in Established state: {}. Closing connection.", e);
+                            state = ConnectionState::Listen;
+                            break;
                         }
                     }
                 }
-
+            }
+            ConnectionState::CloseWait => {
+                // The server is now ready to send its own FIN.
+                println!("Server in CloseWait, sending FIN...");
+                let fin_packet = StyxPacket {
+                    sequence_number: server_isn + 1, // Use the same seq num as the ACK for FIN
+                    ack_number: 0, // Not acknowledging anything
+                    flags: FIN,
+                    payload: Vec::new(),
+                };
+                if let Some(addr) = peer_addr {
+                    socket.send_to(&fin_packet.to_bytes(), addr)?;
+                } else {
+                    eprintln!("Error: Peer address lost. Cannot send FIN.");
+                    state = ConnectionState::Listen;
+                    continue;
+                }
+                state = ConnectionState::LastAck;
+            }
+            ConnectionState::LastAck => {
+                // Wait for the final ACK from the client.
+                println!("Server in LastAck, waiting for final ACK...");
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                let mut final_ack_buf = [0; 1024];
+                match socket.recv_from(&mut final_ack_buf) {
+                    Ok((bytes_read, _)) => {
+                        if let Ok(packet) = StyxPacket::from_bytes(&final_ack_buf[..bytes_read]) {
+                            // The client should ACK our FIN's sequence number.
+                            if packet.flags == ACK && packet.ack_number == server_isn + 2 {
+                                println!("Received final ACK. Connection fully closed.");
+                            } else {
+                                eprintln!("Error: Invalid final ACK received: {:?}", packet);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Timeout waiting for final ACK: {}. Closing connection anyway.", e);
+                    }
+                }
+                // In any case, after LastAck, we return to Listen.
                 println!("--------------------------------------------------");
-                // Go back to listening for a new connection.
                 state = ConnectionState::Listen;
+                peer_addr = None; // Clear client address for the next connection
                 println!("Server is in {:?} state", state);
             }
-            // Other states are not handled by the server in this simple example.
+            // Catch-all for any other states the server shouldn't be in.
             _ => {
-                eprintln!("Unhandled state: {:?}. Returning to Listen state.", state);
+                eprintln!("Server entered an unexpected state: {:?}. Resetting to Listen.", state);
                 state = ConnectionState::Listen;
+                peer_addr = None;
             }
         }
     }

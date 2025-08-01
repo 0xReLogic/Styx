@@ -13,4 +13,14 @@ pub enum ConnectionState {
     SynReceived,
     /// The handshake is complete and the connection is ready for data transfer.
     Established,
+    /// The active closer has sent a FIN and is waiting for an ACK.
+    FinWait1,
+    /// The active closer has received an ACK for its FIN and is waiting for the peer's FIN.
+    FinWait2,
+    /// The passive closer has received a FIN and will send its own FIN after the application closes.
+    CloseWait,
+    /// The passive closer has sent its FIN and is waiting for the final ACK.
+    LastAck,
+    /// The active closer waits for a short period to ensure the final ACK was received.
+    TimeWait,
 }
