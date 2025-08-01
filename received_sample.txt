@@ -1,4 +1,0 @@
-Halo, ini adalah file percobaan untuk ditransfer menggunakan Styx.
-
-Protokol ini sekarang mendukung pengiriman yang andal.
-Baris ketiga sebagai penutup.
