@@ -1,0 +1,4 @@
+Hello, this is a test file to be transferred using Styx.
+
+This protocol now supports reliable transmission.
+The third line is the closing line.
